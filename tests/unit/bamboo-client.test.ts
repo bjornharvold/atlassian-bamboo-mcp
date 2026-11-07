@@ -24,6 +24,7 @@ function createMockResponse(body: unknown, status = 200): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: { get: () => null },
     text: vi.fn().mockResolvedValue(responseBody),
   } as unknown as Response;
 }
@@ -1427,6 +1428,91 @@ describe('BambooClient', () => {
 
       const [, options] = (mockFetch as Mock).mock.calls[0];
       expect(options.headers.Authorization).toBe('Bearer test-token');
+    });
+
+    describe('redirect handling', () => {
+      function createRedirectResponse(location: string | null, status = 302): Response {
+        return {
+          ok: false,
+          status,
+          headers: { get: (name: string) => (name.toLowerCase() === 'location' ? location : null) },
+          text: vi.fn().mockResolvedValue(''),
+        } as unknown as Response;
+      }
+
+      const cfClient = () =>
+        new BambooClient({
+          baseUrl: BASE_URL,
+          token: 'test-token',
+          customHeaders: { 'CF-Access-Client-Secret': 'super-secret' },
+        });
+
+      it('should not auto-follow redirects when custom headers are configured', async () => {
+        (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+        await cfClient().getServerInfo();
+
+        const [, options] = (mockFetch as Mock).mock.calls[0];
+        expect(options.redirect).toBe('manual');
+      });
+
+      it('should keep default redirect behavior when no custom headers are configured', async () => {
+        const client = new BambooClient({ baseUrl: BASE_URL, token: 'test-token' });
+        (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+        await client.getServerInfo();
+
+        const [, options] = (mockFetch as Mock).mock.calls[0];
+        expect(options.redirect).toBeUndefined();
+      });
+
+      it('should refuse cross-origin redirects without forwarding custom headers', async () => {
+        (mockFetch as Mock).mockResolvedValueOnce(
+          createRedirectResponse('https://team.cloudflareaccess.com/cdn-cgi/access/login')
+        );
+
+        const promise = cfClient().getServerInfo();
+
+        await expect(promise).rejects.toThrow(/different origin/);
+        await expect(promise).rejects.not.toThrow(/super-secret/);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
+      it('should refuse a scheme downgrade/upgrade as a different origin', async () => {
+        (mockFetch as Mock).mockResolvedValueOnce(
+          createRedirectResponse('http://bamboo.example.com/rest/api/latest/info')
+        );
+
+        await expect(cfClient().getServerInfo()).rejects.toThrow(/different origin/);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
+      it('should follow same-origin redirects and keep the custom headers', async () => {
+        (mockFetch as Mock)
+          .mockResolvedValueOnce(createRedirectResponse('/rest/api/latest/info/', 301))
+          .mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+        const result = await cfClient().getServerInfo();
+
+        expect(result).toEqual({ version: '9.2.1' });
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        const [secondUrl, secondOptions] = (mockFetch as Mock).mock.calls[1];
+        expect(secondUrl).toBe(`${BASE_URL}/rest/api/latest/info/`);
+        expect(secondOptions.headers['CF-Access-Client-Secret']).toBe('super-secret');
+        expect(secondOptions.redirect).toBe('manual');
+      });
+
+      it('should fail after too many redirects', async () => {
+        (mockFetch as Mock).mockResolvedValue(createRedirectResponse('/loop'));
+
+        await expect(cfClient().getServerInfo()).rejects.toThrow(/Too many redirects/);
+      });
+
+      it('should return a redirect response without Location as-is', async () => {
+        (mockFetch as Mock).mockResolvedValueOnce(createRedirectResponse(null, 304));
+
+        await expect(cfClient().getServerInfo()).rejects.toThrow(/Bamboo API error \(304\)/);
+      });
     });
 
     it('should not be affected by later mutation of the config object', async () => {

@@ -22,6 +22,10 @@ function appendQuery(endpoint: string, query: string): string {
   return query ? `${endpoint}?${query}` : endpoint;
 }
 
+const MAX_REDIRECTS = 5;
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+const CONVERT_TO_GET_STATUSES: ReadonlySet<number> = new Set([301, 302, 303]);
+
 export class BambooClient {
   private baseUrl: string;
   private token: string;
@@ -36,6 +40,47 @@ export class BambooClient {
     if (config.proxyUrl) {
       this.proxyAgent = new ProxyAgent(config.proxyUrl);
     }
+  }
+
+  /**
+   * Fetch, but never let custom headers (e.g. a Cloudflare Access secret) leave
+   * the configured Bamboo origin. fetch only strips `Authorization` on a
+   * cross-origin redirect, so when custom headers are set we follow redirects
+   * ourselves and refuse any that change origin.
+   */
+  private async fetchWithSafeRedirects(url: string, init: RequestInit) {
+    if (Object.keys(this.customHeaders).length === 0) {
+      return undiciFetch(url, init);
+    }
+
+    const allowedOrigin = new URL(this.baseUrl).origin;
+    let currentUrl = url;
+    let currentInit: RequestInit = { ...init, redirect: 'manual' };
+
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const response = await undiciFetch(currentUrl, currentInit);
+      const location = response.headers.get('location');
+      if (!REDIRECT_STATUSES.has(response.status) || !location) {
+        return response;
+      }
+
+      const next = new URL(location, currentUrl);
+      if (next.origin !== allowedOrigin) {
+        throw new Error(
+          `Bamboo redirected (${response.status}) to a different origin (${next.origin}); ` +
+            'refusing to forward custom headers. Check BAMBOO_URL and your Cloudflare Access setup.'
+        );
+      }
+
+      currentUrl = next.toString();
+      const method = (currentInit.method ?? 'GET').toUpperCase();
+      if (CONVERT_TO_GET_STATUSES.has(response.status) && method !== 'GET' && method !== 'HEAD') {
+        const { body: _body, ...rest } = currentInit;
+        currentInit = { ...rest, method: 'GET' };
+      }
+    }
+
+    throw new Error(`Too many redirects (more than ${MAX_REDIRECTS})`);
   }
 
   private async request<T>(
@@ -63,7 +108,7 @@ export class BambooClient {
       fetchOptions.dispatcher = this.proxyAgent;
     }
 
-    const response = await undiciFetch(url, fetchOptions);
+    const response = await this.fetchWithSafeRedirects(url, fetchOptions);
 
     if (!response.ok) {
       const errorText = await response.text();
