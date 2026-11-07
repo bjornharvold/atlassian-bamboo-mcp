@@ -1,5 +1,6 @@
 import { ProxyAgent, fetch as undiciFetch, type RequestInit } from 'undici';
 import type { BambooClientConfig } from './types.js';
+import { parseCustomHeaders } from './custom-headers.js';
 
 /**
  * Build a URL query string from optional parameters
@@ -24,11 +25,13 @@ function appendQuery(endpoint: string, query: string): string {
 export class BambooClient {
   private baseUrl: string;
   private token: string;
+  private customHeaders: Readonly<Record<string, string>>;
   private proxyAgent?: ProxyAgent;
 
   constructor(config: BambooClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, ''); // Remove trailing slash
     this.token = config.token;
+    this.customHeaders = Object.freeze({ ...config.customHeaders });
 
     if (config.proxyUrl) {
       this.proxyAgent = new ProxyAgent(config.proxyUrl);
@@ -41,7 +44,9 @@ export class BambooClient {
   ): Promise<T> {
     const url = `${this.baseUrl}/rest/api/latest${endpoint}`;
 
+    // Custom headers go first so the core headers below always win.
     const headers: Record<string, string> = {
+      ...this.customHeaders,
       'Authorization': `Bearer ${this.token}`,
       'Accept': 'application/json',
       'Content-Type': 'application/json',
@@ -564,5 +569,6 @@ export function createBambooClientFromEnv(): BambooClient {
     baseUrl,
     token,
     proxyUrl,
+    customHeaders: parseCustomHeaders(process.env),
   });
 }

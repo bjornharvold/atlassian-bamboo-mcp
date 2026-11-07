@@ -1332,5 +1332,114 @@ describe('BambooClient', () => {
       const client = createBambooClientFromEnv();
       expect(client).toBeInstanceOf(BambooClient);
     });
+
+    it('should send Cloudflare Access headers from env vars', async () => {
+      process.env.BAMBOO_URL = 'https://bamboo.test.com';
+      process.env.BAMBOO_TOKEN = 'test-token-123';
+      process.env.BAMBOO_CF_ACCESS_CLIENT_ID = 'cf-id.access';
+      process.env.BAMBOO_CF_ACCESS_CLIENT_SECRET = 'cf-secret';
+
+      (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+      await createBambooClientFromEnv().getServerInfo();
+
+      const [, options] = (mockFetch as Mock).mock.calls[0];
+      expect(options.headers).toMatchObject({
+        'CF-Access-Client-Id': 'cf-id.access',
+        'CF-Access-Client-Secret': 'cf-secret',
+        Authorization: 'Bearer test-token-123',
+      });
+    });
+
+    it('should send BAMBOO_HEADERS JSON as extra headers', async () => {
+      process.env.BAMBOO_URL = 'https://bamboo.test.com';
+      process.env.BAMBOO_TOKEN = 'test-token-123';
+      process.env.BAMBOO_HEADERS = '{"X-Gateway-Key":"abc"}';
+
+      (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+      await createBambooClientFromEnv().getServerInfo();
+
+      const [, options] = (mockFetch as Mock).mock.calls[0];
+      expect(options.headers).toMatchObject({ 'X-Gateway-Key': 'abc' });
+    });
+
+    it('should fail fast on invalid custom header config', () => {
+      process.env.BAMBOO_URL = 'https://bamboo.test.com';
+      process.env.BAMBOO_TOKEN = 'test-token-123';
+      process.env.BAMBOO_CF_ACCESS_CLIENT_ID = 'only-id';
+      delete process.env.BAMBOO_CF_ACCESS_CLIENT_SECRET;
+
+      expect(() => createBambooClientFromEnv()).toThrow(/must be set together/);
+    });
+  });
+
+  // ============================================================================
+  // 11. Custom headers
+  // ============================================================================
+  describe('custom headers', () => {
+    it('should send custom headers alongside the default headers', async () => {
+      const client = new BambooClient({
+        baseUrl: BASE_URL,
+        token: 'test-token',
+        customHeaders: { 'CF-Access-Client-Id': 'id', 'CF-Access-Client-Secret': 'secret' },
+      });
+
+      (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+      await client.getServerInfo();
+
+      const [, options] = (mockFetch as Mock).mock.calls[0];
+      expect(options.headers).toEqual({
+        'CF-Access-Client-Id': 'id',
+        'CF-Access-Client-Secret': 'secret',
+        Authorization: 'Bearer test-token',
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      });
+    });
+
+    it('should send the Bearer header when no custom headers are configured', async () => {
+      const client = new BambooClient({ baseUrl: BASE_URL, token: 'test-token' });
+
+      (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+      await client.getServerInfo();
+
+      const [, options] = (mockFetch as Mock).mock.calls[0];
+      expect(options.headers).toEqual({
+        Authorization: 'Bearer test-token',
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      });
+    });
+
+    it('should not let custom headers override Authorization', async () => {
+      const client = new BambooClient({
+        baseUrl: BASE_URL,
+        token: 'test-token',
+        customHeaders: { Authorization: 'Bearer evil' },
+      });
+
+      (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+      await client.getServerInfo();
+
+      const [, options] = (mockFetch as Mock).mock.calls[0];
+      expect(options.headers.Authorization).toBe('Bearer test-token');
+    });
+
+    it('should not be affected by later mutation of the config object', async () => {
+      const customHeaders: Record<string, string> = { 'X-Foo': 'bar' };
+      const client = new BambooClient({ baseUrl: BASE_URL, token: 'test-token', customHeaders });
+      customHeaders['X-Foo'] = 'changed';
+
+      (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+      await client.getServerInfo();
+
+      const [, options] = (mockFetch as Mock).mock.calls[0];
+      expect(options.headers['X-Foo']).toBe('bar');
+    });
   });
 });
