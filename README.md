@@ -108,8 +108,8 @@ create a service token, add a **Service Auth** policy for it on the application,
 ```
 
 This sends `CF-Access-Client-Id` and `CF-Access-Client-Secret` on every request. Use `BAMBOO_HEADERS` for any
-other headers. The `Authorization`, `Accept`, `Content-Type` and `Host` headers are managed by the server and
-cannot be set through `BAMBOO_HEADERS`. When custom headers are configured, redirects to a different origin
+other headers. The `Authorization`, `Accept`, `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Connection` and `Host`
+headers are managed by the server and cannot be set through `BAMBOO_HEADERS`. When custom headers are configured, redirects to a different origin
 (including `http` → `https`) are refused so the headers are never sent to another host; use the final `https`
 URL in `BAMBOO_URL`. Each Bamboo site needs its own server entry with its own variables.
 

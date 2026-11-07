@@ -1,6 +1,6 @@
 import { ProxyAgent, fetch as undiciFetch, type RequestInit } from 'undici';
 import type { BambooClientConfig } from './types.js';
-import { parseCustomHeaders } from './custom-headers.js';
+import { parseCustomHeaders, validateCustomHeaders } from './custom-headers.js';
 
 /**
  * Build a URL query string from optional parameters
@@ -24,7 +24,18 @@ function appendQuery(endpoint: string, query: string): string {
 
 const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
-const CONVERT_TO_GET_STATUSES: ReadonlySet<number> = new Set([301, 302, 303]);
+
+/**
+ * Same method rewriting as the fetch spec: 303 turns anything but GET/HEAD into
+ * GET; 301/302 only turn POST into GET; 307/308 keep the method.
+ */
+function shouldConvertToGet(status: number, method = 'GET'): boolean {
+  const upper = method.toUpperCase();
+  if (status === 303) {
+    return upper !== 'GET' && upper !== 'HEAD';
+  }
+  return (status === 301 || status === 302) && upper === 'POST';
+}
 
 export class BambooClient {
   private baseUrl: string;
@@ -35,7 +46,9 @@ export class BambooClient {
   constructor(config: BambooClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, ''); // Remove trailing slash
     this.token = config.token;
-    this.customHeaders = Object.freeze({ ...config.customHeaders });
+    const customHeaders = { ...config.customHeaders };
+    validateCustomHeaders(customHeaders);
+    this.customHeaders = Object.freeze(customHeaders);
 
     if (config.proxyUrl) {
       this.proxyAgent = new ProxyAgent(config.proxyUrl);
@@ -64,6 +77,9 @@ export class BambooClient {
         return response;
       }
 
+      // We are not going to read this response; release its connection.
+      await response.body?.cancel();
+
       const next = new URL(location, currentUrl);
       if (next.origin !== allowedOrigin) {
         throw new Error(
@@ -73,10 +89,8 @@ export class BambooClient {
       }
 
       currentUrl = next.toString();
-      const method = (currentInit.method ?? 'GET').toUpperCase();
-      if (CONVERT_TO_GET_STATUSES.has(response.status) && method !== 'GET' && method !== 'HEAD') {
-        const { body: _body, ...rest } = currentInit;
-        currentInit = { ...rest, method: 'GET' };
+      if (shouldConvertToGet(response.status, currentInit.method)) {
+        currentInit = { ...currentInit, method: 'GET', body: undefined };
       }
     }
 
@@ -89,7 +103,8 @@ export class BambooClient {
   ): Promise<T> {
     const url = `${this.baseUrl}/rest/api/latest${endpoint}`;
 
-    // Custom headers go first so the core headers below always win.
+    // Custom headers go first (and are validated not to contain any of the managed
+    // headers), so they can never override the client's own headers below.
     const headers: Record<string, string> = {
       ...this.customHeaders,
       'Authorization': `Bearer ${this.token}`,

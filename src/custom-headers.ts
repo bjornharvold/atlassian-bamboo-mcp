@@ -1,20 +1,23 @@
-import { z } from 'zod';
-
-/** Headers the client owns; custom headers must never override them. */
+/** Headers the client owns (or that framing depends on); custom headers must never set them. */
 const PROTECTED_HEADERS: ReadonlySet<string> = new Set([
   'authorization',
   'accept',
   'content-type',
+  'content-length',
+  'transfer-encoding',
+  'connection',
   'host',
 ]);
 
 /** RFC 7230 token characters. */
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+/** Control characters (incl. CR/LF/NUL) and anything outside Latin-1 are not allowed in values. */
+// eslint-disable-next-line no-control-regex
+const INVALID_HEADER_VALUE_PATTERN = /[\u0000-\u0008\u000a-\u001f\u007f]|[^\u0000-ÿ]/;
+
 const CF_ID_HEADER = 'CF-Access-Client-Id';
 const CF_SECRET_HEADER = 'CF-Access-Client-Secret';
-
-const headersSchema = z.record(z.string());
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -38,22 +41,30 @@ function parseHeadersJson(raw: string): Record<string, string> {
     throw new Error('BAMBOO_HEADERS must be a JSON object of header names to string values');
   }
 
+  const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(parsed)) {
     if (typeof value !== 'string') {
       throw new Error(`BAMBOO_HEADERS value for "${name}" must be a string`);
     }
+    headers[name] = value;
   }
-
-  return headersSchema.parse(parsed);
+  return headers;
 }
 
-function validateHeaderNames(headers: Readonly<Record<string, string>>): void {
-  for (const name of Object.keys(headers)) {
+/**
+ * Validate header names and values. Throws without echoing any value.
+ * Used both when parsing env vars and when constructing a client directly.
+ */
+export function validateCustomHeaders(headers: Readonly<Record<string, string>>): void {
+  for (const [name, value] of Object.entries(headers)) {
     if (!HEADER_NAME_PATTERN.test(name)) {
-      throw new Error(`Invalid header name in BAMBOO_HEADERS: "${name}"`);
+      throw new Error(`Invalid header name in custom headers: "${name}"`);
     }
     if (PROTECTED_HEADERS.has(name.toLowerCase())) {
-      throw new Error(`BAMBOO_HEADERS cannot set protected header "${name}"`);
+      throw new Error(`Custom headers cannot set protected header "${name}"`);
+    }
+    if (INVALID_HEADER_VALUE_PATTERN.test(value)) {
+      throw new Error(`Custom header "${name}" has a value with invalid characters`);
     }
   }
 }
@@ -88,15 +99,15 @@ export function parseCustomHeaders(env: Env): Readonly<Record<string, string>> {
   }
 
   const fromJson = rawHeaders === undefined ? {} : parseHeadersJson(rawHeaders);
-  validateHeaderNames(fromJson);
+  const merged =
+    cfId === undefined || cfSecret === undefined
+      ? fromJson
+      : {
+          ...withoutNames(fromJson, [CF_ID_HEADER, CF_SECRET_HEADER]),
+          [CF_ID_HEADER]: cfId,
+          [CF_SECRET_HEADER]: cfSecret,
+        };
 
-  if (cfId === undefined || cfSecret === undefined) {
-    return fromJson;
-  }
-
-  return {
-    ...withoutNames(fromJson, [CF_ID_HEADER, CF_SECRET_HEADER]),
-    [CF_ID_HEADER]: cfId,
-    [CF_SECRET_HEADER]: cfSecret,
-  };
+  validateCustomHeaders(merged);
+  return merged;
 }

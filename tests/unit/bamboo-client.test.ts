@@ -1415,20 +1415,14 @@ describe('BambooClient', () => {
       });
     });
 
-    it('should not let custom headers override Authorization', async () => {
-      const client = new BambooClient({
-        baseUrl: BASE_URL,
-        token: 'test-token',
-        customHeaders: { Authorization: 'Bearer evil' },
-      });
-
-      (mockFetch as Mock).mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
-
-      await client.getServerInfo();
-
-      const [, options] = (mockFetch as Mock).mock.calls[0];
-      expect(options.headers.Authorization).toBe('Bearer test-token');
-    });
+    it.each(['Authorization', 'authorization', 'Content-Type'])(
+      'should reject protected header %s passed programmatically',
+      (name) => {
+        expect(
+          () => new BambooClient({ baseUrl: BASE_URL, token: 't', customHeaders: { [name]: 'x' } })
+        ).toThrow(/protected header/);
+      }
+    );
 
     describe('redirect handling', () => {
       function createRedirectResponse(location: string | null, status = 302): Response {
@@ -1500,6 +1494,50 @@ describe('BambooClient', () => {
         expect(secondUrl).toBe(`${BASE_URL}/rest/api/latest/info/`);
         expect(secondOptions.headers['CF-Access-Client-Secret']).toBe('super-secret');
         expect(secondOptions.redirect).toBe('manual');
+      });
+
+      it.each([
+        { status: 301, call: 'enablePlan', expected: 'GET' },
+        { status: 302, call: 'enablePlan', expected: 'GET' },
+        { status: 303, call: 'enablePlan', expected: 'GET' },
+        { status: 303, call: 'disablePlan', expected: 'GET' },
+        { status: 301, call: 'disablePlan', expected: 'DELETE' },
+        { status: 302, call: 'disablePlan', expected: 'DELETE' },
+        { status: 307, call: 'enablePlan', expected: 'POST' },
+        { status: 308, call: 'disablePlan', expected: 'DELETE' },
+      ] as const)(
+        'should re-issue $call as $expected after a $status redirect',
+        async ({ status, call, expected }) => {
+          (mockFetch as Mock)
+            .mockResolvedValueOnce(createRedirectResponse('/rest/api/latest/plan/PROJ-PLAN/enable', status))
+            .mockResolvedValueOnce(createMockResponse({}));
+
+          await cfClient()[call]('PROJ-PLAN');
+
+          const [, secondOptions] = (mockFetch as Mock).mock.calls[1];
+          expect(secondOptions.method).toBe(expected);
+        }
+      );
+
+      it('should release the redirect response body when following a redirect', async () => {
+        const cancel = vi.fn().mockResolvedValue(undefined);
+        const redirect = { ...createRedirectResponse('/rest/api/latest/info/', 301), body: { cancel } };
+        (mockFetch as Mock)
+          .mockResolvedValueOnce(redirect)
+          .mockResolvedValueOnce(createMockResponse({ version: '9.2.1' }));
+
+        await cfClient().getServerInfo();
+
+        expect(cancel).toHaveBeenCalledTimes(1);
+      });
+
+      it('should release the redirect response body when refusing a cross-origin redirect', async () => {
+        const cancel = vi.fn().mockResolvedValue(undefined);
+        const redirect = { ...createRedirectResponse('https://evil.example.com/'), body: { cancel } };
+        (mockFetch as Mock).mockResolvedValueOnce(redirect);
+
+        await expect(cfClient().getServerInfo()).rejects.toThrow(/different origin/);
+        expect(cancel).toHaveBeenCalledTimes(1);
       });
 
       it('should fail after too many redirects', async () => {

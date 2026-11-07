@@ -83,6 +83,31 @@ describe('parseCustomHeaders()', () => {
     }
   );
 
+  it.each(['Content-Length', 'transfer-encoding', 'Connection'])(
+    'should reject framing header %s',
+    (name) => {
+      expect(() =>
+        parseCustomHeaders({ BAMBOO_HEADERS: JSON.stringify({ [name]: 'v' }) })
+      ).toThrow(/protected header/);
+    }
+  );
+
+  it('should reject header values containing control characters without leaking them', () => {
+    const run = () =>
+      parseCustomHeaders({ BAMBOO_HEADERS: JSON.stringify({ 'X-Foo': 'abc\r\nX-Evil: s3cret' }) });
+    expect(run).toThrow(/invalid characters/);
+    expect(run).not.toThrow(/s3cret/);
+  });
+
+  it('should reject Cloudflare values containing control characters', () => {
+    expect(() =>
+      parseCustomHeaders({
+        BAMBOO_CF_ACCESS_CLIENT_ID: 'id\n',
+        BAMBOO_CF_ACCESS_CLIENT_SECRET: 'secret',
+      })
+    ).toThrow(/invalid characters/);
+  });
+
   it('should require the Cloudflare id and secret together', () => {
     expect(() =>
       parseCustomHeaders({ BAMBOO_CF_ACCESS_CLIENT_ID: 'id' })
